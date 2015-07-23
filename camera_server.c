@@ -1,61 +1,44 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <linux/videodev2.h>
 #include <sys/mman.h>
-
-
-#define print(format, ...) printf("%s %s %d --> "format, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__)
-
-struct camera_share_mem
-{
-	unsigned int mem_len;
-	union
-	{
-		unsigned int offset; //mmap use
-		unsigned int * mem_addr; //v addr
-	};
-};
-
-struct camera_config
-{
-	int width;
-	int height;
-
-	int share_buff_nums; //驱动共享内存个数
-	struct camera_share_mem p_share_mem[16]; //物理数据，最大16个
-	struct camera_share_mem v_share_mem[16]; //共享地址通过mmap后的映射
-};
+#include <sys/select.h>
+#include <string.h>
+#include "camera_config.h"
 
 int camera_open_dev()
 {
 	int camera_fd = -1;
 
+	cam_conf_set_camera_fd(-1);
 	camera_fd = open("/dev/video0", O_RDWR);
 	if (camera_fd < 0)
 	{
 		printf("open dev error\n");
+		return -1;
 	}
 
-	return camera_fd;
+	cam_conf_set_camera_fd(camera_fd);
+
+	return 0;
 }
 
-int camera_init(int camera_fd, struct camera_config *camera_conf)
+int camera_init()
 {
 	struct v4l2_capability camera_capa;
 	struct v4l2_fmtdesc camera_fmtdesc;
 	struct v4l2_format camera_format;
 	struct v4l2_requestbuffers camera_reqbuff;
 	struct v4l2_buffer camera_buffer;
+	struct camera_share_mem tmp_mem;
+	struct camera_share_mem tmp_v_mem;
 	
 	int ret;
 	int i;
-
-	if (camera_conf == NULL)
-	{
-		return -1;
-	}
-	
+	int camera_fd = cam_conf_get_camera_fd(NULL);
+		
 	ret = ioctl(camera_fd, VIDIOC_QUERYCAP, &camera_capa);
 	if (ret > 0)
 	{
@@ -104,12 +87,12 @@ int camera_init(int camera_fd, struct camera_config *camera_conf)
 	else
 	{
 		print("set pixel as %d * %d ok\n", camera_format.fmt.pix.width, camera_format.fmt.pix.height);
-		camera_conf->width = camera_format.fmt.pix.width;
-		camera_conf->height = camera_format.fmt.pix.height;
+		cam_conf_set_width(camera_format.fmt.pix.width);
+		cam_conf_set_height(camera_format.fmt.pix.height);
 	}
 
 	//申请内存映射
-	camera_reqbuff.count = 4; //申请4块内存
+	camera_reqbuff.count = 1; //申请4块内存
 	camera_reqbuff.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	camera_reqbuff.memory = V4L2_MEMORY_MMAP;
 	if(ioctl(camera_fd, VIDIOC_REQBUFS, &camera_reqbuff)< 0)
@@ -118,58 +101,160 @@ int camera_init(int camera_fd, struct camera_config *camera_conf)
 		return -1;
 	}
 	print("VIDIOC_REQBUFS ok\n");
-	camera_conf->share_buff_nums = camera_reqbuff.count;
 
-	for (i=0; i< camera_reqbuff.count; i++)
+	camera_buffer.index = 0;
+	camera_buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	camera_buffer.memory = V4L2_MEMORY_MMAP;
+	if(ioctl(camera_fd, VIDIOC_QUERYBUF, &camera_buffer)< 0)
 	{
-		camera_buffer.index = i;
-		camera_buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		camera_buffer.memory = V4L2_MEMORY_MMAP;
-		if(ioctl(camera_fd, VIDIOC_QUERYBUF, &camera_buffer)< 0)
-		{
-			print("ioctl VIDIOC_REQBUFS error\n");
-			return -1;
-		}
-		camera_conf->p_share_mem[i].offset = camera_buffer.m.offset;
-		camera_conf->p_share_mem[i].mem_len = camera_buffer.length;		
+		print("ioctl VIDIOC_REQBUFS error\n");
+		return -1;
 	}
+	tmp_mem.offset = camera_buffer.m.offset;
+	tmp_mem.mem_len = camera_buffer.length;
+	print("VIDIOC_QUERYBUF ok\n");
+	cam_conf_set_p_share_mem_info(&tmp_mem);
+	print("cam_conf_set_p_share_mem_info ok\n");
 
-	for (i=0; i< camera_conf->share_buff_nums; i++)
+	ret = cam_conf_get_p_share_mem_info(&tmp_mem);
+	if (ret < 0)
 	{
-		camera_conf->v_share_mem[i].mem_addr = mmap(NULL, camera_conf->p_share_mem[i].mem_len, PROT_READ | PROT_WRITE, MAP_SHARED, camera_fd, camera_conf->p_share_mem[i].offset);
-		if (camera_conf->v_share_mem[i].mem_addr != NULL)
-		{
-			print("mem %d mmap success, addr : %p\n", i, camera_conf->v_share_mem[i].mem_addr );
-			camera_conf->v_share_mem[i].mem_len = camera_conf->p_share_mem[i].mem_len;
-		}
-		else
-		{
-			print("mem %d mmap failed", i);
-			camera_conf->v_share_mem[i].mem_len = 0;
-		}	
+		print("cam_conf_get_p_share_mem_info\n");
+		return -1;
 	}
+	print("cam_conf_get_p_share_mem_info ok\n");
+	tmp_v_mem.mem_addr = mmap(NULL, tmp_mem.mem_len, PROT_READ | PROT_WRITE, MAP_SHARED, camera_fd, tmp_mem.offset);
+	if (tmp_v_mem.mem_addr != NULL)
+	{
+		print("mem mmap success, addr : %p\n", tmp_v_mem.mem_addr );
+		cam_conf_set_v_share_mem_info(&tmp_v_mem);
+	}
+	else
+	{
+		print("mem mmap failed");
+		cam_conf_set_v_share_mem_info(&tmp_v_mem);
+	}	
 
 	return 0;
 }
 
-int main(int argc, char * argv[])
+void *net_work_thread(void * arg)
 {
-	int camera_fd = -1;
-	struct camera_config camera_conf;
-
-	camera_fd = camera_open_dev();
-	if (camera_fd < 0)
+	//监听端口，建立客户端连接
+	for ( ; ; )
 	{
-		exit(-1);
+		
+	}
+}
+
+void *stream_recv_thread(void *arg)
+{
+	int v4l2type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	int ret;
+	fd_set rfds;
+	struct timeval outtime;
+	int camera_fd = cam_conf_get_camera_fd(NULL);
+	struct v4l2_buffer camera_qbuff;
+	struct v4l2_buffer camera_dqbuff;
+	
+	print("start stream_recv thread\n");
+
+	memset(&camera_qbuff, 0, sizeof(camera_qbuff));
+	camera_qbuff.index = 0;
+	camera_qbuff.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	camera_qbuff.memory = V4L2_MEMORY_MMAP;
+	ret = ioctl(camera_fd, VIDIOC_QBUF, &camera_qbuff);
+	if (ret < 0)
+	{
+		print("VIDIOC_QBUF error\n");
+		return NULL;
 	}
 
-	//初始化
-	camera_init(camera_fd, &camera_conf);
+	ret = ioctl(camera_fd, VIDIOC_STREAMON, &v4l2type);
+	if(ret < 0)
+	{
+		print("VIDIOC_STREAMON error\n");
+		return NULL;
+	}
+	//取流
+	for ( ; ; )
+	{
+		FD_ZERO(&rfds); 
+		FD_SET(camera_fd, &rfds); 
+		outtime.tv_sec = 1;       /* Timeout. */ 
+		outtime.tv_usec = 0; 
+
+		ret = select(camera_fd+1, &rfds, NULL, NULL, &outtime); 
+		if (ret == -1)
+		{
+			print("camera fd select error\n");
+		}
+		else if (ret == 0)
+		{
+			//time out
+			print("strem recv time out\n");
+		}
+		else
+		{
+			//data is ready
+			print("data is ready\n");
+			memset(&camera_dqbuff, 0, sizeof(camera_dqbuff));
+			camera_dqbuff.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			camera_dqbuff.memory = V4L2_MEMORY_MMAP;
+			ret = ioctl(camera_fd, VIDIOC_DQBUF, &camera_dqbuff);
+			if (ret < 0)
+			{
+				print("VIDIOC_QBUF error\n");
+			}
+			else
+			{
+				//取流到共享缓冲区
+				copy_image_into_share_mem();
+				//重新放入队列
+				memset(&camera_qbuff, 0, sizeof(camera_qbuff));
+				camera_qbuff.index = 0;
+				camera_qbuff.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				camera_qbuff.memory = V4L2_MEMORY_MMAP;
+				ret = ioctl(camera_fd, VIDIOC_QBUF, &camera_qbuff);
+				if (ret < 0)
+				{
+					print("VIDIOC_QBUF error\n");
+					return NULL;
+				}
+			}
+		}
+	}
+
+	v4l2type = V4L2_BUF_TYPE_VIDEO_CAPTURE;  
+	ret = ioctl(camera_fd, VIDIOC_STREAMOFF, &v4l2type);
+}
+
+int main(int argc, char * argv[])
+{
+	pthread_t net_thread_pid;
+	pthread_t stream_pid;
+	int ret;
+
+	camera_conf_init(); 
+	ret= camera_open_dev();
+	if (ret < 0)
+	{
+		print("open camera device error\n");
+		return -1;
+	}
+
+	//摄像头初始化
+	camera_init();
 
 	//启动网络线程
-	
+	pthread_create(&net_thread_pid, NULL,net_work_thread, NULL);
 	//启动取流线程
-	
-	close(camera_fd);
+	pthread_create(&stream_pid, NULL,stream_recv_thread, NULL);
+
+	while(1)
+	{
+		sleep(1);
+	}
+
 	return 0;
 }
