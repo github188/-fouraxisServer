@@ -216,7 +216,8 @@ char * share_image_get_mem_addr()
 
 int copy_image_into_share_mem()
 {
-	print("\n");
+	int i;
+
 	if (private_camera_conf.image_share_buff == NULL)
 	{
 		print("private_camera_conf.image_share_buff is NULL\n");
@@ -229,19 +230,22 @@ int copy_image_into_share_mem()
 	cam_conf_lock_share_buf();
 	memcpy(private_camera_conf.image_share_buff, private_camera_conf.v_share_mem.mem_addr, private_camera_conf.image_share_buff_len);
 	cam_conf_unlock_share_buf();
-	print("copy data len: %d\n", private_camera_conf.image_share_buff_len);
-	sem_post(&private_camera_conf.image_sem);
+	//print("copy data len: %d\n", private_camera_conf.image_share_buff_len);
+	for (i=0; i< private_camera_conf.client_connect.clint_nums; i++)
+	{
+		sem_post(&private_camera_conf.image_sem);
+	}
 	return 0;
 }
 
 //参数:目标缓存和长度
-int copy_image_from_share_mem(char * dst_buff, int dst_buff_len)
+int copy_image_from_share_mem(char * dst_buff, int *dst_buff_len)
 {
 	if (dst_buff == NULL)
 	{
 		return -1;
 	}
-	if (dst_buff_len < private_camera_conf.image_share_buff_len)
+	if (*dst_buff_len < private_camera_conf.image_share_buff_len)
 	{
 		print("dst buffer is too short\n");
 		return -2;
@@ -250,5 +254,72 @@ int copy_image_from_share_mem(char * dst_buff, int dst_buff_len)
 	cam_conf_lock_share_buf();
 	memcpy(dst_buff, private_camera_conf.image_share_buff, private_camera_conf.image_share_buff_len) ;
 	cam_conf_unlock_share_buf();
+
+	*dst_buff_len = private_camera_conf.image_share_buff_len;
+	return 0;
 }
+
+int add_client(int client_fd, struct sockaddr_in * client_addr)
+{
+	int i;
+	int client_index;
+	
+	if (client_addr == NULL)
+	{
+		return -1;
+	}
+	pthread_mutex_lock(&private_camera_conf.config_lock);
+	// 0-15
+	if (private_camera_conf.client_connect.clint_nums+1 > MAX_CLIENT_NUMS-1)
+	{
+		print("client full\n");
+		goto _err;
+	}
+
+	//
+	client_index = private_camera_conf.client_connect.clint_nums;
+	private_camera_conf.client_connect.client_tail[client_index].client_fd = client_fd;
+	memcpy(&private_camera_conf.client_connect.client_tail[client_index].clint_addr, client_addr, sizeof(struct sockaddr_in));	
+	private_camera_conf.client_connect.clint_nums++;
+
+_err:
+	pthread_mutex_unlock(&private_camera_conf.config_lock);
+	return -2;
+	
+}
+
+int del_client(int client_fd)
+{
+	int i;
+	int client_index;
+	
+	for (i=0; i< private_camera_conf.client_connect.clint_nums; i++)
+	{
+		if (private_camera_conf.client_connect.client_tail[i].client_fd == client_fd)
+		{
+			client_index == i;
+			break;
+		}
+	}
+
+	if (i == private_camera_conf.client_connect.clint_nums)
+	{
+		print("no this connect\n");
+		goto _err;
+	}
+	pthread_mutex_lock(&private_camera_conf.config_lock);
+	for (i=client_index; i< private_camera_conf.client_connect.clint_nums-1; i++)
+	{
+		memcpy(&private_camera_conf.client_connect.client_tail[i], &private_camera_conf.client_connect.client_tail[i+1], sizeof(struct client_info));
+	}
+	memset(&private_camera_conf.client_connect.client_tail[i], 0, sizeof(struct client_info));
+
+	private_camera_conf.client_connect.clint_nums--;
+	
+	pthread_mutex_unlock(&private_camera_conf.config_lock);
+	return 0;
+_err:
+	return -1;
+}
+
 

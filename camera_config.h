@@ -3,8 +3,28 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <semaphore.h>
+#include <netinet/in.h>
 
 #define print(format, ...) printf("%s %s %d --> "format, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__)
+#define LISTEN_PORT 8090
+#define MAX_CLIENT_NUMS 16
+
+struct image_head
+{
+	unsigned int image_size; //image size
+    struct timeval image_time;
+    unsigned int image_format;	//yuyv:0 jpg:1
+    unsigned short image_width;
+    unsigned short image_height;
+    int res[3];
+};
+
+//网络传输块
+typedef struct image_info
+{
+	struct image_head head;
+    unsigned char data[0];	//data
+}image_info;
 
 struct camera_share_mem
 {
@@ -14,6 +34,18 @@ struct camera_share_mem
 		unsigned int offset; //mmap use
 		unsigned char * mem_addr; //v addr
 	};
+};
+
+struct client_info
+{
+	int client_fd; //socket
+	struct sockaddr_in clint_addr; //最大数量
+};
+
+struct link_info
+{
+	int clint_nums; //客户端连接数量
+	struct client_info client_tail[MAX_CLIENT_NUMS];
 };
 
 struct camera_config
@@ -31,6 +63,9 @@ struct camera_config
 	int image_share_buff_len;
 	pthread_mutex_t image_share_buff_lock; //共享缓冲区锁
 	sem_t image_sem; //共享图片信号量
+
+	//网络相关
+	struct link_info client_connect; //客户端连接信息
 };
 
 static struct camera_config private_camera_conf;
@@ -58,6 +93,10 @@ int share_image_get_mem_size();
 char * share_image_get_mem_addr();
 //图形数据拷贝
 int copy_image_into_share_mem();
-int copy_image_from_share_mem(char * dst_buff, int dst_buff_len);
+int copy_image_from_share_mem(char * dst_buff, int *dst_buff_len);
+//网络相关
+int add_client(int client_fd, struct sockaddr_in * client_addr);
+int del_client(int client_fd);
+
 #endif
 

@@ -6,6 +6,8 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include "camera_config.h"
 
 int camera_open_dev()
@@ -138,12 +140,77 @@ int camera_init()
 	return 0;
 }
 
+void * client_net_handle(void * arg)
+{
+	int client_fd;
+	client_fd = *(int *)arg;
+	char * image_buff = NULL;
+	int image_buff_len = 1024*1024*1;
+	int image_len; //图片长度
+	int ret;
+	struct image_head image_head_data;
+
+	image_buff = (char *)malloc(image_buff_len);
+	for ( ; ; )
+	{
+		image_len = image_buff_len;
+		ret = copy_image_from_share_mem(image_buff, &image_len);
+		//发送数据
+		image_head_data.image_format = htonl(0);
+		image_head_data.image_size = htonl(image_len);
+		gettimeofday(&image_head_data.image_time, NULL);
+		image_head_data.image_width = htons(cam_conf_get_width(NULL));
+		image_head_data.image_height = htons(cam_conf_get_height(NULL));
+		ret = write(client_fd, &image_head_data, sizeof(struct image_head));
+		print("send head len: %d\n", ret);
+
+		ret = write(client_fd, image_buff, image_len);
+		print("send image len: %d\n", image_len);
+	}
+}
+
 void *net_work_thread(void * arg)
 {
+	int server_fd = -1;
+	struct sockaddr_in server_addr;
+	struct sockaddr_in client_addr;
+	int client_fd;
+	pthread_t pid;
+	int ret;
+	
+	server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (server_fd < 0)
+	{
+		print("socket error\n");
+		return NULL;
+	}
+
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_addr.s_addr= htonl(INADDR_ANY);
+	server_addr.sin_port = htons(LISTEN_PORT);
+	ret = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+	if (ret < 0)
+	{
+		print("bind error\n");
+		return NULL;
+	}
+	ret = listen(server_fd, 10);
+	if (ret < 0)
+	{
+		print("listen error\n");
+		return NULL;
+	}
 	//监听端口，建立客户端连接
 	for ( ; ; )
 	{
-		
+		int client_addr_len = sizeof(client_addr);
+		client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+		if (client_fd > 0)
+		{
+			print("client connect\n");
+			add_client(client_fd, &client_addr);
+			pthread_create(&pid, NULL, client_net_handle, &client_fd);
+		}
 	}
 }
 
@@ -197,7 +264,7 @@ void *stream_recv_thread(void *arg)
 		else
 		{
 			//data is ready
-			print("data is ready\n");
+			//print("data is ready\n");
 			memset(&camera_dqbuff, 0, sizeof(camera_dqbuff));
 			camera_dqbuff.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 			camera_dqbuff.memory = V4L2_MEMORY_MMAP;
