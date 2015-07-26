@@ -11,11 +11,13 @@
 
 struct image_head
 {
+	unsigned int head_size;
+	unsigned int head_version;
 	unsigned int image_size; //image size
-    struct timeval image_time;
+    //time_t image_time;
     unsigned int image_format;	//yuyv:0 jpg:1
-    unsigned short image_width;
-    unsigned short image_height;
+    unsigned int image_width;
+    unsigned int image_height;
     int res[3];
 };
 

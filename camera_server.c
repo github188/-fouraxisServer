@@ -8,6 +8,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <signal.h>
+
 #include "camera_config.h"
 
 int camera_open_dev()
@@ -145,7 +147,7 @@ void * client_net_handle(void * arg)
 	int client_fd;
 	client_fd = *(int *)arg;
 	char * image_buff = NULL;
-	int image_buff_len = 1024*1024*1;
+	int image_buff_len = 1024*1024*4;
 	int image_len; //图片长度
 	int ret;
 	struct image_head image_head_data;
@@ -153,19 +155,36 @@ void * client_net_handle(void * arg)
 	image_buff = (char *)malloc(image_buff_len);
 	for ( ; ; )
 	{
+		memset(image_buff, 0, image_buff_len);
 		image_len = image_buff_len;
 		ret = copy_image_from_share_mem(image_buff, &image_len);
 		//发送数据
+		image_head_data.head_size = htonl(sizeof(struct image_head));
+		image_head_data.head_version = htonl(1);
 		image_head_data.image_format = htonl(0);
 		image_head_data.image_size = htonl(image_len);
-		gettimeofday(&image_head_data.image_time, NULL);
-		image_head_data.image_width = htons(cam_conf_get_width(NULL));
-		image_head_data.image_height = htons(cam_conf_get_height(NULL));
+		//image_head_data.image_time = time(NULL);
+		image_head_data.image_width = htonl(cam_conf_get_width(NULL));
+		image_head_data.image_height = htonl(cam_conf_get_height(NULL));
 		ret = write(client_fd, &image_head_data, sizeof(struct image_head));
 		print("send head len: %d\n", ret);
-
+		print("image_head_data.image_width: %hd\n", cam_conf_get_width(NULL));
+		print("image_head_data.image_height: %hd\n", cam_conf_get_height(NULL));
+		print("image_head_data.image_format: %d\n", 0);
+		if (ret <= 0)
+		{
+			print("client disconnect\n");
+			return NULL;
+		}
 		ret = write(client_fd, image_buff, image_len);
 		print("send image len: %d\n", image_len);
+		if (ret <= 0)
+		{
+			print("client disconnect\n");
+			return NULL;
+		}
+
+		sleep(1);
 	}
 }
 
@@ -302,6 +321,7 @@ int main(int argc, char * argv[])
 	pthread_t stream_pid;
 	int ret;
 
+	signal(SIGPIPE, SIG_IGN);
 	camera_conf_init(); 
 	ret= camera_open_dev();
 	if (ret < 0)
